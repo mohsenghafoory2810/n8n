@@ -1,3 +1,4 @@
+// oxlint-disable typescript/no-deprecated
 /* eslint-disable @typescript-eslint/no-unsafe-argument */
 /* eslint-disable @typescript-eslint/no-explicit-any */
 /* eslint-disable @typescript-eslint/no-unsafe-call */
@@ -77,7 +78,7 @@ export async function executeLegacyRequest(
 					agentOptions: buildLegacyAgentOptions(requestObject),
 					allowedDomains: requestObject.allowedDomains,
 					sendCredentialsOnCrossOriginRedirect:
-						requestObject.sendCredentialsOnCrossOriginRedirect ?? true,
+						requestObject.sendCredentialsOnCrossOriginRedirect ?? false,
 					authSendImmediately: requestObject.auth?.sendImmediately,
 				})
 			: await invokeAxios(axiosConfig, requestObject.auth?.sendImmediately);
@@ -101,7 +102,7 @@ export async function executeLegacyRequest(
 		const { config, response } = error;
 
 		// Axios hydrates the original error with more data. We extract them.
-		// https://github.com/axios/axios/blob/master/lib/core/enhanceError.js
+		// https://github.com/axios/axios/blob/v1.x/lib/core/AxiosError.js
 		// Note: `code` is ignored as it's an expected part of the errorData.
 		if (error.isAxiosError) {
 			error.config = error.request = undefined;

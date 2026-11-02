@@ -11,12 +11,12 @@ import { mock } from 'vitest-mock-extended';
 
 import { createAdminWithApiKey, createOwnerWithApiKey } from '@test-integration/db/users';
 
-import { JwtService } from '../jwt.service';
+import { JwtService } from '@n8n/backend-services';
 import { PublicApiKeyService } from '../public-api-key.service';
 
 const instanceSettings = mock<InstanceSettings>({ encryptionKey: 'test-key' });
 
-const jwtService = new JwtService(instanceSettings, mock());
+const jwtService = new JwtService(instanceSettings, mock(), mock());
 
 let apiKeyRepository: ApiKeyRepository;
 let publicApiKeyService: PublicApiKeyService;

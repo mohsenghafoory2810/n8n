@@ -30,7 +30,6 @@ import type {
 import {
 	ICredentialsHelper,
 	NodeHelpers,
-	OPEN_AI_API_CREDENTIAL_TYPE,
 	Workflow,
 	UnexpectedError,
 	UserError,
@@ -44,6 +43,7 @@ import { CredentialTypes } from '@/credential-types';
 import { CredentialsOverwrites } from '@/credentials-overwrites';
 import { DCR_MANAGED_CREDENTIAL_FIELDS, OAUTH_PINNED_FIELDS } from '@/oauth/dcr-managed-fields';
 import { ExternalSecretsConfig } from '@/modules/external-secrets.ee/external-secrets.config';
+import type { PolicyActor } from '@/policy/policy-enforcement-backend';
 import { PolicyEnforcementService } from '@/policy/policy-enforcement.service';
 import { AiGatewayService } from '@/services/ai-gateway.service';
 
@@ -101,8 +101,23 @@ const { nodeTypes: mockNodeTypes } = createMockNodeTypes();
 
 const INVALID_JSON_VALUE = Symbol('invalidJsonValue');
 
+/** A run names no user: the starter is not known reliably on every path, so a run never guesses. */
+function decryptActor({ executionId, userId }: IWorkflowExecuteAdditionalData): PolicyActor {
+	if (executionId) return { kind: 'system', reason: 'execution', executionId };
+	if (userId) return { kind: 'user', user: { id: userId } };
+	return { kind: 'system', reason: 'execution' };
+}
+
 @Service()
 export class CredentialsHelper extends ICredentialsHelper {
+	/**
+	 * Ciphertext each decrypted credential object was read from. An OAuth token written back
+	 * later was minted with the client fields in that object, so the write is dropped when the
+	 * row changed in between (e.g. a save that replaced the OAuth client). Keyed by identity:
+	 * the object `getDecrypted` returns is the one core hands back to the write.
+	 */
+	private readonly storedDataByDecrypted = new WeakMap<ICredentialDataDecryptedObject, string>();
+
 	constructor(
 		private readonly credentialTypes: CredentialTypes,
 		private readonly credentialsOverwrites: CredentialsOverwrites,
@@ -422,6 +437,7 @@ export class CredentialsHelper extends ICredentialsHelper {
 		decryptedData: ICredentialDataDecryptedObject,
 		mode: WorkflowExecuteMode,
 		additionalKeys: IWorkflowDataProxyAdditionalKeys,
+		selfData: ICredentialDataDecryptedObject,
 	): ICredentialDataDecryptedObject {
 		try {
 			return workflow.expression.getComplexParameterValue(
@@ -431,7 +447,7 @@ export class CredentialsHelper extends ICredentialsHelper {
 				additionalKeys,
 				undefined,
 				undefined,
-				decryptedData,
+				selfData,
 			) as ICredentialDataDecryptedObject;
 		} catch (error) {
 			// Non-execution contexts may not have runtime data for optional credential fields.
@@ -442,6 +458,7 @@ export class CredentialsHelper extends ICredentialsHelper {
 				decryptedData,
 				mode,
 				additionalKeys,
+				selfData,
 				error,
 			);
 		}
@@ -453,6 +470,7 @@ export class CredentialsHelper extends ICredentialsHelper {
 		decryptedData: ICredentialDataDecryptedObject,
 		mode: WorkflowExecuteMode,
 		additionalKeys: IWorkflowDataProxyAdditionalKeys,
+		selfData: ICredentialDataDecryptedObject,
 		originalError: unknown,
 	): ICredentialDataDecryptedObject {
 		const propertiesByName = new Map(
@@ -469,7 +487,7 @@ export class CredentialsHelper extends ICredentialsHelper {
 					additionalKeys,
 					undefined,
 					undefined,
-					decryptedData,
+					selfData,
 				) as ICredentialDataDecryptedObject;
 
 				if (Object.prototype.hasOwnProperty.call(resolvedProperty, propertyName)) {
@@ -557,7 +575,7 @@ export class CredentialsHelper extends ICredentialsHelper {
 		executeData?: IExecuteData,
 		raw?: boolean,
 		expressionResolveValues?: ICredentialsExpressionResolveValues,
-		options?: IGetDecryptedCredentialsOptions,
+		options?: IGetDecryptedCredentialsOptions & { actor?: PolicyActor },
 	): Promise<ICredentialDataDecryptedObject> {
 		// Sub-nodes, such as a chat model connected to a chain or agent, inherit executeData.node
 		// from their parent. Prefer expressionResolveValues.node when present: it is always
@@ -578,10 +596,9 @@ export class CredentialsHelper extends ICredentialsHelper {
 
 		const credentialsEntity = await this.getCredentialsEntity(nodeCredentials, type);
 
-		// Managed OpenAI credentials are unavailable to nodes that can request undeclared types.
+		// Managed credentials are unavailable to nodes that can request undeclared types.
 		if (
 			credentialsEntity.isManaged &&
-			type === OPEN_AI_API_CREDENTIAL_TYPE &&
 			consumerNode &&
 			FULL_ACCESS_NODE_TYPES.has(consumerNode.type)
 		) {
@@ -589,12 +606,15 @@ export class CredentialsHelper extends ICredentialsHelper {
 		}
 
 		// Validate against the executing project's policy before any decryption happens.
-		await this.policyEnforcementService.enforceCredentialDecrypt({
-			credentialType: type,
-			credentialId: credentialsEntity.id,
-			consumer: consumerNode ? { nodeType: consumerNode.type } : null,
-			projectId: additionalData.projectId ?? null,
-		});
+		await this.policyEnforcementService.enforceCredentialDecrypt(
+			{
+				credentialType: type,
+				credentialId: credentialsEntity.id,
+				consumer: consumerNode ? { nodeType: consumerNode.type } : null,
+				projectId: additionalData.projectId ?? null,
+			},
+			options?.actor ?? decryptActor(additionalData),
+		);
 
 		const credentials = new Credentials(
 			{ id: credentialsEntity.id, name: credentialsEntity.name },
@@ -664,7 +684,7 @@ export class CredentialsHelper extends ICredentialsHelper {
 		}
 
 		if (raw === true) {
-			return decryptedDataOriginal;
+			return this.trackStoredData(decryptedDataOriginal, credentialsEntity);
 		}
 
 		if (
@@ -680,7 +700,7 @@ export class CredentialsHelper extends ICredentialsHelper {
 			);
 		}
 
-		return await this.applyDefaultsAndOverwrites(
+		const decryptedData = await this.applyDefaultsAndOverwrites(
 			additionalData,
 			decryptedDataOriginal,
 			type,
@@ -688,6 +708,17 @@ export class CredentialsHelper extends ICredentialsHelper {
 			executeData,
 			expressionResolveValues,
 		);
+		return this.trackStoredData(decryptedData, credentialsEntity);
+	}
+
+	private trackStoredData<T extends ICredentialDataDecryptedObject>(
+		decryptedData: T,
+		credentialsEntity: CredentialsEntity,
+	): T {
+		if (credentialsEntity.data) {
+			this.storedDataByDecrypted.set(decryptedData, credentialsEntity.data);
+		}
+		return decryptedData;
 	}
 
 	/**
@@ -761,6 +792,17 @@ export class CredentialsHelper extends ICredentialsHelper {
 			isCredential: true,
 		});
 
+		// Secret values supplied by an instance overwrite stay out of `$self`.
+		const selfData = { ...decryptedData };
+		for (const { name, typeOptions } of credentialsProperties) {
+			if (
+				(typeOptions?.password || typeOptions?.expirable) &&
+				dataWithOverwrites[name] !== storedData[name]
+			) {
+				delete selfData[name];
+			}
+		}
+
 		if (expressionResolveValues) {
 			try {
 				decryptedData = expressionResolveValues.workflow.expression.getParameterValue(
@@ -774,7 +816,7 @@ export class CredentialsHelper extends ICredentialsHelper {
 					additionalKeys,
 					executeData,
 					false,
-					decryptedData,
+					selfData,
 				) as ICredentialDataDecryptedObject;
 			} catch (e) {
 				e.message += ' [Error resolving credentials]';
@@ -797,6 +839,7 @@ export class CredentialsHelper extends ICredentialsHelper {
 					decryptedData,
 					mode,
 					additionalKeys,
+					selfData,
 				);
 			} finally {
 				await workflow.expression.releaseIsolate();
@@ -877,21 +920,43 @@ export class CredentialsHelper extends ICredentialsHelper {
 
 		const credentials = await this.getCredentials(nodeCredentials, type);
 
+		// The token was minted with the client fields in `data`. When the row was rewritten since
+		// `data` was read, the token may belong to a client that is no longer stored, so it is not
+		// persisted: the next execution finds no token and mints one from the current row.
+		const storedData = this.storedDataByDecrypted.get(data);
+		if (storedData !== undefined && storedData !== credentials.data) {
+			return;
+		}
+
 		await credentials.updateData({ oauthTokenData: data.oauthTokenData });
+		const { data: newData } = credentials.getDataToSave();
+		if (newData === undefined) {
+			throw new UnexpectedError('Credential data is missing after re-encryption');
+		}
 		// Ciphertext only. `name` and `type` would be written back unchanged, and a payload
 		// that cannot carry `type` keeps this off the sealed `credentialSave` path.
 		const newCredentialsData: Pick<ICredentialsDb, 'data' | 'updatedAt'> = {
-			data: credentials.getDataToSave().data,
+			data: newData,
 			updatedAt: new Date(),
 		};
 
-		// Save the credentials in DB
-		const findQuery = {
-			id: credentials.id,
-			type,
-		};
+		if (storedData === undefined) {
+			await this.credentialsRepository.update({ id: credentials.id, type }, newCredentialsData);
+			return;
+		}
 
-		await this.credentialsRepository.update(findQuery, newCredentialsData);
+		// The check above and this write are two statements, so the row itself is the guard: the
+		// update matches only while the row still holds the ciphertext that `data` was read from.
+		const written = await this.credentialsRepository.updateDataIfUnchanged(
+			credentialsEntity.id,
+			type,
+			storedData,
+			newData,
+		);
+		if (written) {
+			// A later refresh in the same execution must compare against what is stored now.
+			this.storedDataByDecrypted.set(data, newData);
+		}
 	}
 }
 

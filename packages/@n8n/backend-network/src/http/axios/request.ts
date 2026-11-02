@@ -24,10 +24,12 @@ import {
 	validateUrlSsrf,
 } from './utils';
 import type { SsrfBridge } from '../../ssrf';
+import type { NodeAgents } from '../node-agents';
 
 export function convertN8nRequestToAxios(
 	n8nRequest: IHttpRequestOptions,
 	ssrfBridge?: SsrfBridge,
+	agents?: NodeAgents,
 ): AxiosRequestConfig {
 	// Destructure properties with the same name first.
 	const { headers, method, timeout, auth, proxy, url } = n8nRequest;
@@ -39,7 +41,7 @@ export function convertN8nRequestToAxios(
 		auth,
 		url,
 		maxBodyLength: Infinity,
-		maxContentLength: Infinity,
+		maxContentLength: n8nRequest.maxResponseBodyBytes ?? Infinity,
 	} as AxiosRequestConfig;
 
 	axiosRequest.params = n8nRequest.qs;
@@ -62,6 +64,11 @@ export function convertN8nRequestToAxios(
 		axiosRequest.responseType = n8nRequest.encoding;
 	}
 
+	if (agents) {
+		axiosRequest.httpAgent = agents.httpAgent;
+		axiosRequest.httpsAgent = agents.httpsAgent;
+	}
+
 	const agentOptions = buildAgentOptions(n8nRequest);
 	setAxiosAgents(axiosRequest, agentOptions, proxy, ssrfBridge ?? 'disabled');
 
@@ -69,7 +76,7 @@ export function convertN8nRequestToAxios(
 		agentOptions,
 		axiosRequest,
 		n8nRequest.proxy,
-		n8nRequest.sendCredentialsOnCrossOriginRedirect ?? true,
+		n8nRequest.sendCredentialsOnCrossOriginRedirect ?? false,
 		n8nRequest.allowedDomains,
 		ssrfBridge ?? 'disabled',
 	);
@@ -156,6 +163,7 @@ function isEmpty(value: unknown): boolean {
 }
 
 /** Remove empty request body on GET, HEAD, and OPTIONS requests */
+// oxlint-disable-next-line typescript/no-deprecated
 export function removeEmptyBody(requestOptions: IHttpRequestOptions | IRequestOptions) {
 	const method = requestOptions.method ?? 'GET';
 	if (NoBodyHttpMethods.includes(method) && isEmpty(requestOptions.body)) {
@@ -171,18 +179,22 @@ export function removeEmptyBody(requestOptions: IHttpRequestOptions | IRequestOp
 export async function httpRequest(
 	requestOptions: IHttpRequestOptions & { returnFullResponse: true },
 	ssrfBridge?: SsrfBridge,
+	agents?: NodeAgents,
 ): Promise<IN8nHttpFullResponse>;
 export async function httpRequest(
 	requestOptions: IHttpRequestOptions & { returnFullResponse?: false },
 	ssrfBridge?: SsrfBridge,
+	agents?: NodeAgents,
 ): Promise<IN8nHttpResponse>;
 export async function httpRequest(
 	requestOptions: IHttpRequestOptions,
 	ssrfBridge?: SsrfBridge,
+	agents?: NodeAgents,
 ): Promise<IN8nHttpFullResponse | IN8nHttpResponse>;
 export async function httpRequest(
 	requestOptions: IHttpRequestOptions,
 	ssrfBridge?: SsrfBridge,
+	agents?: NodeAgents,
 ): Promise<IN8nHttpFullResponse | IN8nHttpResponse> {
 	removeEmptyBody(requestOptions);
 
@@ -190,7 +202,7 @@ export async function httpRequest(
 	await validateUrlSsrf(url, ssrfBridge);
 	await validateProxySsrf(requestOptions.proxy, ssrfBridge);
 
-	const axiosRequest = convertN8nRequestToAxios(requestOptions, ssrfBridge);
+	const axiosRequest = convertN8nRequestToAxios(requestOptions, ssrfBridge, agents);
 	if (axiosRequest.data === undefined || axiosRequest.method?.toUpperCase() === 'GET') {
 		delete axiosRequest.data;
 	}
@@ -204,7 +216,7 @@ export async function httpRequest(
 				agentOptions: buildAgentOptions(requestOptions),
 				allowedDomains: requestOptions.allowedDomains,
 				sendCredentialsOnCrossOriginRedirect:
-					requestOptions.sendCredentialsOnCrossOriginRedirect ?? true,
+					requestOptions.sendCredentialsOnCrossOriginRedirect ?? false,
 				authSendImmediately: requestOptions.auth?.sendImmediately,
 			})
 		: await invokeAxios(axiosRequest, requestOptions.auth?.sendImmediately);

@@ -1,16 +1,35 @@
+import { AGENTS_N8N_CHAT_FLAG } from '@n8n/api-types';
 import { TELEMETRY_EVENT } from '@n8n/telemetry';
 import type { InferTelemetryProps, TelemetryEventDef } from '@n8n/telemetry';
 import { useTelemetry } from '@n8n/composables/useTelemetry';
 import { useRootStore } from '@n8n/stores/useRootStore';
+import { usePostHog } from '@/app/stores/posthog.store';
+import { useAgentsN8nChatFlag } from './useAgentsN8nChatFlag';
 import type { AgentConfigFingerprint, AgentTelemetryStatus } from './agentTelemetry.utils';
 
-export type AgentCreateSource = 'button' | 'dropdown' | 'card';
+export type AgentCreateSource =
+	| 'button'
+	| 'dropdown'
+	| 'card'
+	| 'empty_state_blank'
+	| 'empty_state_prompt'
+	| 'empty_state_template'
+	| 'command_bar';
+export type N8nChatAgentSource = 'card' | 'library' | 'dropdown';
+export type N8nChatHint = 'channel_chip' | 'new_chat_sidebar';
 
 export function useAgentTelemetry() {
 	const telemetry = useTelemetry();
 	const rootStore = useRootStore();
+	const isAgentsN8nChatFlag = useAgentsN8nChatFlag();
 
 	const common = () => ({ session_id: rootStore.pushRef });
+
+	// Reports `null` when the user has no flag value for this experiment.
+	function currentN8nChatVariant(): string | null {
+		const variant = usePostHog().getVariant(AGENTS_N8N_CHAT_FLAG);
+		return typeof variant === 'string' ? variant : null;
+	}
 
 	// Telemetry is best-effort: every track call is wrapped so a RudderStack
 	// failure can never surface to a caller (and never takes down a critical
@@ -23,10 +42,11 @@ export function useAgentTelemetry() {
 		}
 	}
 
-	function trackClickedNewAgent(source: AgentCreateSource, agentId: string) {
+	function trackClickedNewAgent(source: AgentCreateSource, agentId: string, templateId?: string) {
 		safeTrack(TELEMETRY_EVENT.AGENTS.USER_CLICKED_NEW_AGENT, {
 			source,
 			agent_id: agentId,
+			...(templateId ? { template_id: templateId } : {}),
 			...common(),
 		});
 	}
@@ -53,6 +73,23 @@ export function useAgentTelemetry() {
 		status: AgentTelemetryStatus;
 	}) {
 		safeTrack(TELEMETRY_EVENT.AGENTS.USER_ADDED_TRIGGER_TO_AGENT, {
+			agent_id: params.agentId,
+			trigger_type: params.triggerType,
+			triggers: params.triggers,
+			config_version: params.configVersion,
+			status: params.status,
+			...common(),
+		});
+	}
+
+	function trackRemovedTrigger(params: {
+		agentId: string;
+		triggerType: string;
+		triggers: string[];
+		configVersion: string;
+		status: AgentTelemetryStatus;
+	}) {
+		safeTrack(TELEMETRY_EVENT.AGENTS.USER_REMOVED_TRIGGER_FROM_AGENT, {
 			agent_id: params.agentId,
 			trigger_type: params.triggerType,
 			triggers: params.triggers,
@@ -190,20 +227,97 @@ export function useAgentTelemetry() {
 		}
 	}
 
+	function trackDismissedAgentPublishedModal(params: {
+		agentId: string;
+		dontShowAgain: boolean;
+		action: 'got_it' | 'talk_to_agent' | 'closed';
+		n8nChatLive: boolean;
+	}) {
+		safeTrack(TELEMETRY_EVENT.AGENTS.USER_DISMISSED_AGENT_PUBLISHED_MODAL, {
+			agent_id: params.agentId,
+			dont_show_again: params.dontShowAgain,
+			action: params.action,
+			n8n_chat_live: params.n8nChatLive,
+			...common(),
+		});
+	}
+
+	function trackViewedN8nChatHint(params: { hint: N8nChatHint; agentId?: string }) {
+		safeTrack(TELEMETRY_EVENT.AGENTS.USER_VIEWED_N8N_CHAT_HINT, {
+			hint: params.hint,
+			...(params.agentId ? { agent_id: params.agentId } : {}),
+			variant: currentN8nChatVariant(),
+			...common(),
+		});
+	}
+
+	function trackDismissedN8nChatHint(params: { hint: N8nChatHint; agentId?: string }) {
+		safeTrack(TELEMETRY_EVENT.AGENTS.USER_DISMISSED_N8N_CHAT_HINT, {
+			hint: params.hint,
+			...(params.agentId ? { agent_id: params.agentId } : {}),
+			variant: currentN8nChatVariant(),
+			...common(),
+		});
+	}
+
+	function trackSelectedN8nChatAgent(params: { agentId: string; source: N8nChatAgentSource }) {
+		safeTrack(TELEMETRY_EVENT.AGENTS.USER_SELECTED_N8N_CHAT_AGENT, {
+			agent_id: params.agentId,
+			source: params.source,
+			variant: currentN8nChatVariant(),
+			...common(),
+		});
+	}
+
+	function trackSentMessageToN8nChatAgent(params: {
+		agentId: string;
+		threadId: string;
+		isNewThread: boolean;
+	}) {
+		safeTrack(TELEMETRY_EVENT.AGENTS.USER_SENT_MESSAGE_TO_N8N_CHAT_AGENT, {
+			agent_id: params.agentId,
+			thread_id: params.threadId,
+			is_new_thread: params.isNewThread,
+			variant: currentN8nChatVariant(),
+			...common(),
+		});
+	}
+
+	// No-op with the flag off, so sidebar callers don't need their own flag check.
+	function trackClickedSidebarItem(
+		params: { item: 'new_chat' } | { item: 'chat'; chatType: 'assistant' | 'agent' },
+	) {
+		if (!isAgentsN8nChatFlag.value) return;
+		safeTrack(TELEMETRY_EVENT.AGENTS.USER_CLICKED_N8N_CHAT_SIDEBAR_ITEM, {
+			...(params.item === 'new_chat'
+				? { item: 'new_chat' as const }
+				: { item: 'chat' as const, chat_type: params.chatType }),
+			variant: currentN8nChatVariant(),
+			...common(),
+		});
+	}
+
 	return {
 		trackClickedNewAgent,
 		trackSubmittedMessage,
 		trackAddedTrigger,
+		trackRemovedTrigger,
 		trackOpenedToolFromList,
 		trackOpenedSkillFromList,
 		trackOpenedAddSkillModal,
 		trackImportedSkill,
 		trackDuplicatedAgent,
+		trackDismissedAgentPublishedModal,
+		trackViewedN8nChatHint,
+		trackDismissedN8nChatHint,
 		trackStartedChannelSetup,
 		trackClosedChannelSetup,
 		trackFailedToConnectChannel,
 		trackCheckedTeamsCredential,
 		trackClickedDeployToAzure,
 		trackDownloadedTeamsAppPackage,
+		trackSelectedN8nChatAgent,
+		trackSentMessageToN8nChatAgent,
+		trackClickedSidebarItem,
 	};
 }

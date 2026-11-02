@@ -23,9 +23,9 @@ const startSpanMock = vi.fn().mockReturnValue({
 
 function buildConfig(overrides: Partial<ExpressionEngineConfig> = {}): ExpressionEngineConfig {
 	const config = new ExpressionEngineConfig();
-	// The provider is a no-op unless engine === 'vm'. Default tests to the active
-	// engine so shared assertions exercise the real code path.
-	return Object.assign(config, { engine: 'vm' as const, ...overrides });
+	// The provider is a no-op unless engine is 'vm', and spans are off by default.
+	// Turn both on so shared assertions exercise the real code path.
+	return Object.assign(config, { engine: 'vm' as const, tracesEnabled: true, ...overrides });
 }
 
 function buildLogger(): Logger {
@@ -92,6 +92,24 @@ describe('ExpressionObservabilityProvider', () => {
 			expect(metric).toBeDefined();
 			const output = await promClient.register.metrics();
 			expect(output).toContain('n8n_expression_pool_acquired_total 2');
+		});
+
+		it('registers the native evaluation counter with result and reason labels', async () => {
+			const provider = new ExpressionObservabilityProvider(
+				buildConfig(),
+				buildLogger(),
+				buildGlobalConfig(),
+				otelService,
+			);
+			provider.metrics.counter(EXPRESSION_METRICS.nativeEvaluations.name, 1, {
+				result: 'fallback',
+				reason: 'too_large',
+			});
+
+			const output = await promClient.register.metrics();
+			expect(output).toContain(
+				'n8n_expression_native_evaluations_total{result="fallback",reason="too_large"} 1',
+			);
 		});
 
 		it('registers a prom gauge with the cleaned name', async () => {

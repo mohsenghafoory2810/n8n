@@ -2,9 +2,7 @@ import type { LicenseProvider } from '@n8n/backend-common';
 import { Logger } from '@n8n/backend-common';
 import { GlobalConfig } from '@n8n/config';
 import {
-	DEFAULT_WORKFLOW_HISTORY_PRUNE_LIMIT,
 	LICENSE_FEATURES,
-	LICENSE_QUOTAS,
 	Time,
 	UNLIMITED_LICENSE_QUOTA,
 	type BooleanLicenseFeature,
@@ -13,6 +11,7 @@ import {
 import { SettingsRepository } from '@n8n/db';
 import { OnPubSubEvent, OnShutdown } from '@n8n/decorators';
 import { Container, Service } from '@n8n/di';
+import { ensureError } from '@n8n/utils/errors/ensure-error';
 import type { TEntitlement, TLicenseBlock } from '@n8n_io/license-sdk';
 import { LicenseManager } from '@n8n_io/license-sdk';
 import { InstanceSettings } from 'n8n-core';
@@ -110,7 +109,8 @@ export class License implements LicenseProvider {
 				autoRenewTimer: false,
 				renewOnInit: shouldRenew,
 				autoRenewOffset,
-				detachFloatingOnShutdown: this.globalConfig.license.detachFloatingOnShutdown,
+				detachFloatingOnShutdown:
+					this.globalConfig.license.detachFloatingOnShutdown && !this.instanceSettings.isMultiMain,
 				offlineMode,
 				logger: this.logger,
 				loadCertStr: async () => await this.loadCertStr(),
@@ -171,7 +171,12 @@ export class License implements LicenseProvider {
 	}
 
 	private async onFeatureChange() {
-		void this.broadcastReloadLicenseCommand();
+		// The entitlement timer fires on every main at once, so without this check each main publishes the same reload.
+		// `onLicenseRenewed` has no check, because the renewal runs on any main and only that main stored the new cert.
+		// TODO(leaderless): Remove this publish. Each process already updates its own features on this timer.
+		if (this.instanceSettings.isLeader) {
+			void this.broadcastReloadLicenseCommand();
+		}
 		await this.notifyRefreshCallbacks();
 	}
 
@@ -181,7 +186,7 @@ export class License implements LicenseProvider {
 	}
 
 	private async broadcastReloadLicenseCommand() {
-		if (this.globalConfig.executions.mode === 'queue' && this.instanceSettings.isLeader) {
+		if (this.globalConfig.executions.mode === 'queue') {
 			const { Publisher } = await import('@/scaling/pubsub/publisher.service.js');
 			await Container.get(Publisher).publishCommand({ command: 'reload-license' });
 		}
@@ -236,17 +241,25 @@ export class License implements LicenseProvider {
 		this.logger.debug('License activated');
 	}
 
+	/** Loads the cert another instance stored. Never renews. */
 	@OnPubSubEvent('reload-license')
 	async reload(): Promise<void> {
 		if (!this.manager) {
 			return;
 		}
-		await this.manager.reload();
+		try {
+			await this.manager.reloadStoredCert();
+		} catch (error: unknown) {
+			this.logger.warn('Failed to reload the stored license cert', {
+				error: ensureError(error).message,
+			});
+			return;
+		}
 		await this.notifyRefreshCallbacks();
 		this.logger.debug('License reloaded');
 	}
 
-	/** Runs one auto-renewal pass, gated by the SDK on its auto-renewal flag. */
+	/** Runs one auto-renewal pass. */
 	async renewIfDue(): Promise<void> {
 		await this.manager?.renewIfDue();
 	}
@@ -420,7 +433,7 @@ export class License implements LicenseProvider {
 		return this.manager?.getCurrentEntitlements() ?? [];
 	}
 
-	getValue<T extends keyof FeatureReturnType>(feature: T): FeatureReturnType[T] {
+	getValue<T extends keyof FeatureReturnType>(_feature: T): FeatureReturnType[T] {
 		return undefined as FeatureReturnType[T];
 	}
 
@@ -547,6 +560,7 @@ export class License implements LicenseProvider {
 
 	/** @deprecated Use `LicenseState` instead. */
 	isWithinUsersLimit() {
+		// oxlint-disable-next-line typescript/no-deprecated
 		return this.getUsersLimit() === UNLIMITED_LICENSE_QUOTA;
 	}
 

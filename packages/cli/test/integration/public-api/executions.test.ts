@@ -8,7 +8,7 @@ import {
 	shareWorkflowWithUsers,
 	testDb,
 } from '@n8n/backend-test-utils';
-import type { ExecutionEntity, IExecutionResponse, User } from '@n8n/db';
+import { type ExecutionEntity, type IExecutionResponse, type User } from '@n8n/db';
 import { Container } from '@n8n/di';
 import { InstanceSettings } from 'n8n-core';
 import { type ExecutionStatus } from 'n8n-workflow';
@@ -18,7 +18,7 @@ import { ActiveExecutions } from '@/active-executions';
 import type { ActiveWorkflowManager } from '@/active-workflow-manager';
 import { AbortedExecutionRetryError } from '@/errors/aborted-execution-retry.error';
 import { QueuedExecutionRetryError } from '@/errors/queued-execution-retry.error';
-import { ConflictError } from '@/errors/response-errors/conflict.error';
+import { ConflictError } from '@n8n/errors';
 import { ExecutionService } from '@/executions/execution.service';
 import { CommunityPackagesService } from '@/modules/community-packages/community-packages.service';
 import { Telemetry } from '@/telemetry';
@@ -998,41 +998,61 @@ describe('GET /executions', () => {
 		}
 	});
 
-	test('should return executions filtered by project ID', async () => {
-		/**
-		 * Arrange
-		 */
-		const [firstProject, secondProject] = await Promise.all([
-			createTeamProject(),
-			createTeamProject(),
-		]);
-		const [firstWorkflow, secondWorkflow] = await Promise.all([
-			createWorkflow({}, firstProject),
-			createWorkflow({}, secondProject),
-		]);
-		const [firstExecution, secondExecution, _] = await Promise.all([
-			createExecution({}, firstWorkflow),
-			createExecution({}, firstWorkflow),
-			createExecution({}, secondWorkflow),
-		]);
+	test.each<{
+		data: () => User;
+		type: 'owner' | 'member';
+	}>([
+		{ type: 'owner', data: () => owner },
+		{ type: 'member', data: () => user1 },
+	])(
+		'should return executions filtered by project ID for $type',
+		async ({ data: getUser, type }) => {
+			testServer.license.enable('feat:sharing');
+			const user = getUser();
+			const agent = testServer.publicApiAgentFor(user);
 
-		/**
-		 * Act
-		 */
-		const response = await authOwnerAgent.get('/executions').query({
-			projectId: firstProject.id,
-		});
+			/**
+			 * Arrange
+			 */
+			const [firstProject, secondProject] = await Promise.all([
+				createTeamProject('first project', owner),
+				createTeamProject('second project', owner),
+			]);
+			if (type === 'member') {
+				await Promise.all([
+					linkUserToProject(user, firstProject, 'project:editor'),
+					linkUserToProject(user, secondProject, 'project:editor'),
+				]);
+			}
 
-		/**
-		 * Assert
-		 */
-		expect(response.statusCode).toBe(200);
-		expect(response.body.data.length).toBe(2);
-		expect(response.body.nextCursor).toBeNull();
-		expect(response.body.data.map((execution: ExecutionEntity) => execution.id)).toEqual(
-			expect.arrayContaining([firstExecution.id, secondExecution.id]),
-		);
-	});
+			const [firstWorkflow, secondWorkflow] = await Promise.all([
+				createWorkflow({}, firstProject),
+				createWorkflow({}, secondProject),
+			]);
+			const [firstExecution, secondExecution, _] = await Promise.all([
+				createExecution({}, firstWorkflow),
+				createExecution({}, firstWorkflow),
+				createExecution({}, secondWorkflow),
+			]);
+
+			/**
+			 * Act
+			 */
+			const response = await agent.get('/executions').query({
+				projectId: firstProject.id,
+			});
+
+			/**
+			 * Assert
+			 */
+			expect(response.statusCode).toBe(200);
+			expect(response.body.data.length).toBe(2);
+			expect(response.body.nextCursor).toBeNull();
+			expect(response.body.data.map((execution: ExecutionEntity) => execution.id)).toEqual(
+				expect.arrayContaining([firstExecution.id, secondExecution.id]),
+			);
+		},
+	);
 
 	describe('with startedAfter and startedBefore filters', () => {
 		test('should retrieve executions started after a given time', async () => {
