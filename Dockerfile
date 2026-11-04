@@ -10,7 +10,20 @@ FROM node:${NODE_VERSION}-bookworm-slim AS builder
 WORKDIR /src
 
 # Build toolchain + git (needed by pnpm/prepare) + CA certs for registry HTTPS
-RUN apt-get update && apt-get install -y --no-install-recommends \
+#RUN apt-get update && apt-get install -y --no-install-recommends \
+#    python3 \
+#    make \
+#    g++ \
+#    git \
+#    ca-certificates \
+#    && rm -rf /var/lib/apt/lists/*
+
+# Use ArvanCloud Debian mirror (disable default sources)
+RUN rm -f /etc/apt/sources.list.d/* && \
+    echo "deb http://mirror.arvancloud.ir/debian bookworm main contrib non-free non-free-firmware" > /etc/apt/sources.list && \
+    echo "deb http://mirror.arvancloud.ir/debian bookworm-updates main contrib non-free non-free-firmware" >> /etc/apt/sources.list && \
+    echo "deb http://mirror.arvancloud.ir/debian-security bookworm-security main contrib non-free non-free-firmware" >> /etc/apt/sources.list && \
+    apt-get update && apt-get install -y --no-install-recommends \
     python3 \
     make \
     g++ \
@@ -19,8 +32,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Install pnpm via Corepack (version must match packageManager in package.json)
-RUN corepack enable pnpm \
-    && corepack prepare pnpm@12.4.2 --activate
+#RUN corepack enable pnpm \
+#    && corepack prepare pnpm@12.4.2 --activate
+
+# --- Install pnpm using Iranian mirror ---
+ENV npm_config_registry=https://mirror.abrha.net/repository/npm/
+ENV COREPACK_NPM_REGISTRY=https://mirror.abrha.net/repository/npm/
+
+RUN npm install -g pnpm@12.4.2 \
+    && pnpm config set registry https://mirror.abrha.net/repository/npm/
 
 COPY . /src
 
@@ -56,7 +76,27 @@ ENV NODE_ENV=production \
     TZ=Asia/Tehran
 
 # Chromium + runtime deps (Debian/bookworm)
-RUN apt-get update && apt-get install -y --no-install-recommends \
+#RUN apt-get update && apt-get install -y --no-install-recommends \
+#    chromium \
+#    libnss3 \
+#    libfreetype6 \
+#    libharfbuzz0b \
+#    ca-certificates \
+#    fonts-freefont-ttf \
+#    tini \
+#    gosu \
+#    git \
+#    openssh-client \
+#    graphicsmagick \
+#    && rm -rf /var/lib/apt/lists/*
+
+
+# Use ArvanCloud Debian mirror (disable default sources)
+RUN rm -f /etc/apt/sources.list.d/* && \
+    echo "deb http://mirror.arvancloud.ir/debian bookworm main contrib non-free non-free-firmware" > /etc/apt/sources.list && \
+    echo "deb http://mirror.arvancloud.ir/debian bookworm-updates main contrib non-free non-free-firmware" >> /etc/apt/sources.list && \
+    echo "deb http://mirror.arvancloud.ir/debian-security bookworm-security main contrib non-free non-free-firmware" >> /etc/apt/sources.list && \
+    apt-get update && apt-get install -y --no-install-recommends \
     chromium \
     libnss3 \
     libfreetype6 \
@@ -78,16 +118,34 @@ ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium \
 WORKDIR /home/node
 
 # Deployed production bundle (all workspace deps resolved correctly)
-COPY --from=builder /src/compiled /usr/local/lib/node_modules/n8n
+#COPY --from=builder /src/compiled /usr/local/lib/node_modules/n8n
+
+COPY --chown=node:node --from=builder /src/compiled /usr/local/lib/node_modules/n8n
 
 # Install external community nodes and modules
+#RUN mkdir -p /home/node/.n8n/custom && \
+#    cd /home/node/.n8n/custom && \
+#    npm init -y && \
+#    npm install n8n-nodes-text-manipulation n8n-nodes-globals n8n-nodes-document-generator n8n-nodes-puppeteer-extended moment-jalaali
+
+# Install external community nodes and modules (using Iranian mirror)
 RUN mkdir -p /home/node/.n8n/custom && \
     cd /home/node/.n8n/custom && \
     npm init -y && \
+    npm config set registry https://mirror.abrha.net/repository/npm/ && \
     npm install n8n-nodes-text-manipulation n8n-nodes-globals n8n-nodes-document-generator n8n-nodes-puppeteer-extended moment-jalaali
 
+#COPY docker/images/n8n/docker-entrypoint.sh /docker-entrypoint.sh
+#RUN chmod +x /docker-entrypoint.sh && \
+#    ln -sf /usr/local/lib/node_modules/n8n/bin/n8n /usr/local/bin/n8n && \
+#    mkdir -p /home/node/.n8n && \
+#    chown -R node:node /home/node && \
+#    rm -rf /root/.npm /tmp/*
+
 COPY docker/images/n8n/docker-entrypoint.sh /docker-entrypoint.sh
-RUN chmod +x /docker-entrypoint.sh && \
+
+RUN chmod 755 /docker-entrypoint.sh && \
+    chown root:root /docker-entrypoint.sh && \
     ln -sf /usr/local/lib/node_modules/n8n/bin/n8n /usr/local/bin/n8n && \
     mkdir -p /home/node/.n8n && \
     chown -R node:node /home/node && \
